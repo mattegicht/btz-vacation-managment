@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vacation Calendar - Trainer</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.8/index.global.min.css" rel="stylesheet">
+    <style>
+        body { background-color: #f8f9fa; }
+        #calendar { max-width: 1100px; margin: 40px auto; padding: 20px; background: white; border-radius: 8px; shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        .fc-event { cursor: pointer; }
+    </style>
+</head>
+<body>
+
+<nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+    <div class="container-fluid">
+        <a class="navbar-brand" href="/trainer_dashboard.html">Trainer Dashboard</a>
+        <div class="collapse navbar-collapse">
+            <ul class="navbar-nav ms-auto">
+                <li class="nav-item"><a class="nav-link" href="/trainer_dashboard.html">Back to List</a></li>
+                <li class="nav-item"><a class="nav-link" href="/logout">Logout</a></li>
+            </ul>
+        </div>
+    </div>
+</nav>
+
+<div class="container mt-4">
+    <h2 class="text-center">Vacation Calendar</h2>
+    <div id="calendar"></div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.8/index.global.min.js"></script>
+<script>
+    document.addEventListener('DOMContentLoaded', function() {
+        const calendarEl = document.getElementById('calendar');
+        const calendar = new FullCalendar.Calendar(calendarEl, {
+            initialView: 'dayGridMonth',
+            firstDay: 1, // Start week on Monday
+            headerToolbar: {
+                left: 'prev,next today',
+                center: 'title',
+                right: 'dayGridMonth,timeGridWeek,listMonth'
+            },
+            events: function(fetchInfo, successCallback, failureCallback) {
+                const vacationsPromise = fetch('/api/me')
+                    .then(response => response.json())
+                    .then(user => {
+                        if (!user) return [];
+                        return fetch(`/api/vacationsByUser?userId=${user.id}`).then(res => res.json());
+                    });
+
+                const holidaysPromise = fetch('https://get.api-feiertage.de/?years=2026&states=by')
+                    .then(response => response.json())
+                    .then(data => data.feiertage || []);
+
+                Promise.all([vacationsPromise, holidaysPromise])
+                    .then(([vacations, holidays]) => {
+                        // Process Vacations
+                        const vacationEvents = vacations
+                            .filter(v => v.status !== 'denied')
+                            .map(v => {
+                                const participantName = v.participant ? v.participant.name : 'Unknown';
+                                const color = stringToColor(participantName);
+                                return {
+                                    title: `${participantName} (${v.status})`,
+                                    start: v.startDate,
+                                    end: v.endDate,
+                                    backgroundColor: color,
+                                    borderColor: color,
+                                    extendedProps: { type: 'vacation', status: v.status, participant: participantName }
+                                };
+                            });
+
+                        // Process Holidays
+                        const holidayEvents = holidays.map(h => ({
+                            title: `Holiday: ${h.fname}`,
+                            start: h.date,
+                            allDay: true,
+                            backgroundColor: '#e9ecef',
+                            borderColor: '#dee2e6',
+                            textColor: '#495057',
+                            display: 'block',
+                            extendedProps: { type: 'holiday' }
+                        }));
+
+                        successCallback([...vacationEvents, ...holidayEvents]);
+                    })
+                    .catch(error => {
+                        console.error('Error fetching events:', error);
+                        failureCallback(error);
+                    });
+            },
+            eventClick: function(info) {
+                if (info.event.extendedProps.type === 'holiday') return;
+                alert(`Participant: ${info.event.extendedProps.participant}\nStatus: ${info.event.extendedProps.status}\nDates: ${info.event.startStr} to ${info.event.endStr}`);
+            }
+        });
+        calendar.render();
+    });
+
+    function stringToColor(str) {
+        let hash = 0;
+        for (let i = 0; i < str.length; i++) {
+            hash = str.charCodeAt(i) + ((hash << 5) - hash);
+        }
+        const c = (hash & 0x00FFFFFF).toString(16).toUpperCase();
+        return '#' + '00000'.substring(0, 6 - c.length) + c;
+    }
+
+    /* Removed getStatusColor as we use dynamic coloring now */
+</script>
+</body>
+</html>

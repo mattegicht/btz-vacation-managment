@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Participant Dashboard - Vacation Management</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body class="bg-light">
+
+<nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+    <div class="container-fluid">
+        <a class="navbar-brand" href="#">My Vacations</a>
+        <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+            <span class="navbar-toggler-icon"></span>
+        </button>
+        <div class="collapse navbar-collapse" id="navbarNav">
+            <ul class="navbar-nav ms-auto">
+                <li class="nav-item">
+                    <a class="nav-link" href="#" data-bs-toggle="modal" data-bs-target="#changePasswordModal">Change Password</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link" href="/logout">Logout</a>
+                </li>
+            </ul>
+        </div>
+    </div>
+</nav>
+
+<!-- ... (existing content) ... -->
+
+<!-- Change Password Modal -->
+<div class="modal fade" id="changePasswordModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Change Password</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="changePasswordForm">
+                    <div class="mb-3">
+                        <label class="form-label">New Password</label>
+                        <input type="password" class="form-control" id="newPassword" name="newPassword" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Confirm New Password</label>
+                        <input type="password" class="form-control" id="confirmPassword" required>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                <button type="button" class="btn btn-primary" onclick="submitPasswordChange()">Update Password</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="container mt-4">
+    <div class="row mb-4">
+        <div class="col-md-6">
+            <div class="card bg-info text-white">
+                <div class="card-body text-center">
+                    <h1 id="vacationDaysCounter">--</h1>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-6 d-flex align-items-center justify-content-end">
+             <button class="btn btn-primary btn-lg" data-bs-toggle="modal" data-bs-target="#requestVacationModal">
+                Request Vacation
+            </button>
+        </div>
+    </div>
+
+    <h2>My Vacation Entries</h2>
+    <div class="card shadow-sm mt-3">
+        <div class="card-body">
+            <table class="table table-striped table-hover" id="vacationTable">
+                <thead>
+                <tr>
+                    <th>Start Date</th>
+                    <th>End Date</th>
+                    <th>Status</th>
+                    <th>Trainer</th>
+                </tr>
+                </thead>
+                <tbody>
+                <!-- Vacations will be populated here -->
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- Request Vacation Modal -->
+<div class="modal fade" id="requestVacationModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Request Vacation</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="requestVacationForm">
+                    <div class="mb-3">
+                        <label class="form-label">Start Date</label>
+                        <input type="date" class="form-control" name="startDate" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">End Date</label>
+                        <input type="date" class="form-control" name="endDate" required>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                <button type="button" class="btn btn-primary" onclick="submitVacationRequest()">Submit Request</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+    document.addEventListener('DOMContentLoaded', loadVacations);
+
+    function loadVacations() {
+        fetch('/api/me')
+            .then(response => {
+                if (!response.ok) throw new Error("Not logged in");
+                return response.json();
+            })
+            .then(user => {
+                if (!user) return;
+                
+                // Display vacation days as integer
+                document.getElementById('vacationDaysCounter').innerText = Math.floor(user.vacationDays);
+
+                fetch(`/api/vacationsByUser?userId=${user.id}`)
+                    .then(response => response.json())
+                    .then(vacations => {
+                        const tbody = document.querySelector('#vacationTable tbody');
+                        tbody.innerHTML = '';
+                        vacations.forEach(v => {
+                            const tr = document.createElement('tr');
+                            tr.innerHTML = `
+                                <td>${v.startDate}</td>
+                                <td>${v.endDate}</td>
+                                <td><span class="badge ${getStatusBadge(v.status)}">${v.status}</span></td>
+                                <td>${v.trainer ? v.trainer.name : '-'}</td>
+                            `;
+                            tbody.appendChild(tr);
+                        });
+                    });
+            })
+            .catch(error => console.error('Error:', error));
+    }
+
+    function submitVacationRequest() {
+        const form = document.getElementById('requestVacationForm');
+        const formData = new FormData(form);
+
+        fetch('/api/requestVacation', {
+            method: 'POST',
+            body: formData
+        })
+        .then(response => response.text())
+        .then(result => {
+            alert(result);
+            const modal = bootstrap.Modal.getInstance(document.getElementById('requestVacationModal'));
+            modal.hide();
+            form.reset();
+            loadVacations(); // Refresh list
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            alert('Failed to request vacation');
+        });
+    }
+
+    function submitPasswordChange() {
+        const newPassword = document.getElementById('newPassword').value;
+        const confirmPassword = document.getElementById('confirmPassword').value;
+
+        if (newPassword !== confirmPassword) {
+            alert("Passwords do not match!");
+            return;
+        }
+
+        const form = document.getElementById('changePasswordForm');
+        const formData = new FormData(form);
+
+        fetch('/api/changePassword', {
+            method: 'POST',
+            body: formData
+        })
+        .then(response => response.text())
+        .then(result => {
+            alert(result);
+            const modal = bootstrap.Modal.getInstance(document.getElementById('changePasswordModal'));
+            modal.hide();
+            form.reset();
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            alert('Failed to change password');
+        });
+    }
+
+    function getStatusBadge(status) {
+        if (status === 'approved') return 'bg-success';
+        if (status === 'denied') return 'bg-danger';
+        return 'bg-warning';
+    }
+</script>
+</body>
+</html>
