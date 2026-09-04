@@ -26,6 +26,8 @@ public class VacationEntry {
     private User trainer;
 
     private String status = "pending";
+    private String reason;
+    private Double deductedDays;
 
     public Integer getId() {
         return id;
@@ -73,5 +75,21 @@ public class VacationEntry {
 
     public void setStatus(String status) {
         this.status = status;
+    }
+
+    public String getReason() {
+        return reason;
+    }
+
+    public void setReason(String reason) {
+        this.reason = reason;
+    }
+
+    public Double getDeductedDays() {
+        return deductedDays;
+    }
+
+    public void setDeductedDays(Double deductedDays) {
+        this.deductedDays = deductedDays;
     }
 }

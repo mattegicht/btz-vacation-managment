@@ -88,6 +88,12 @@
             <button class="btn btn-outline-secondary me-2" onclick="toggleVacationView()" id="toggleViewBtn">
                 Show All Requests
             </button>
+            <button class="btn btn-info me-2" data-bs-toggle="modal" data-bs-target="#companyHolidaysModal">
+                Add Company Holidays
+            </button>
+            <button class="btn btn-warning me-2" onclick="openRemoveHolidaysModal()">
+                Remove Company Holidays
+            </button>
             <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addParticipantModal">
                 Add Participant
             </button>
@@ -133,6 +139,55 @@
             <div class="modal-footer">
                 <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
                 <button type="button" class="btn btn-primary" onclick="submitVacationDaysUpdate()">Save Changes</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Company Holidays Modal -->
+<div class="modal fade" id="companyHolidaysModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Add Company Holidays</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="companyHolidaysForm">
+                    <div class="mb-3">
+                        <label class="form-label">Start Date</label>
+                        <input type="date" class="form-control" name="startDate" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">End Date</label>
+                        <input type="date" class="form-control" name="endDate" required>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                <button type="button" class="btn btn-primary" onclick="submitCompanyHolidays()">Add Holidays</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Remove Company Holidays Modal -->
+<div class="modal fade" id="removeCompanyHolidaysModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Remove Company Holidays</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p>Select a holiday period to remove. This will refund the vacation days to all affected participants.</p>
+                <div class="list-group" id="holidayList">
+                    <!-- Holidays will be populated here -->
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
             </div>
         </div>
     </div>
@@ -398,6 +453,97 @@
         .catch(error => {
             console.error('Error:', error);
             alert('Failed to change password');
+        });
+    }
+
+    function submitCompanyHolidays() {
+        const form = document.getElementById('companyHolidaysForm');
+        const formData = new FormData(form);
+        formData.append('trainerId', currentUserId);
+
+        fetch('/api/addCompanyHolidays', {
+            method: 'POST',
+            body: formData
+        })
+        .then(response => response.text())
+        .then(result => {
+            alert(result);
+            const modal = bootstrap.Modal.getInstance(document.getElementById('companyHolidaysModal'));
+            modal.hide();
+            form.reset();
+            loadAssignedParticipants(currentUserId);
+            loadVacations(currentUserId);
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            alert('Failed to add Company Holidays');
+        });
+    }
+
+    function openRemoveHolidaysModal() {
+        fetch(`/api/getCompanyHolidays?trainerId=${currentUserId}`)
+            .then(response => response.json())
+            .then(entries => {
+                const list = document.getElementById('holidayList');
+                list.innerHTML = '';
+                
+                // Group by date range
+                const groups = {};
+                entries.forEach(e => {
+                    const key = `${e.startDate}|${e.endDate}`;
+                    if (!groups[key]) {
+                        groups[key] = 0;
+                    }
+                    groups[key]++;
+                });
+
+                if (Object.keys(groups).length === 0) {
+                    list.innerHTML = '<div class="text-center">No company holidays found.</div>';
+                } else {
+                    for (const [key, count] of Object.entries(groups)) {
+                        const [start, end] = key.split('|');
+                        const item = document.createElement('a');
+                        item.className = 'list-group-item list-group-item-action d-flex justify-content-between align-items-center';
+                        item.innerHTML = `
+                            <div>
+                                <strong>${start} to ${end}</strong>
+                                <div class="small text-muted">${count} participants affected</div>
+                            </div>
+                            <button class="btn btn-danger btn-sm" onclick="removeHoliday('${start}', '${end}')">Remove</button>
+                        `;
+                        list.appendChild(item);
+                    }
+                }
+                
+                new bootstrap.Modal(document.getElementById('removeCompanyHolidaysModal')).show();
+            });
+    }
+
+    function removeHoliday(start, end) {
+        if (!confirm(`Are you sure you want to remove holidays from ${start} to ${end}? This will refund days to participants.`)) {
+            return;
+        }
+
+        const formData = new FormData();
+        formData.append('startDate', start);
+        formData.append('endDate', end);
+        formData.append('trainerId', currentUserId);
+
+        fetch('/api/removeCompanyHolidays', {
+            method: 'POST',
+            body: formData
+        })
+        .then(response => response.text())
+        .then(result => {
+            alert(result);
+            const modal = bootstrap.Modal.getInstance(document.getElementById('removeCompanyHolidaysModal'));
+            modal.hide();
+            loadAssignedParticipants(currentUserId);
+            loadVacations(currentUserId);
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            alert('Failed to remove Company Holidays');
         });
     }
 </script>

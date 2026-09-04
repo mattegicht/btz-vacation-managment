@@ -1,11 +1,10 @@
 package com.example.demo;
-import java.time.DayOfWeek;
 import java.time.LocalDate;
 import java.security.Principal;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
-import java.util.HashSet;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Controller;
@@ -16,9 +15,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseBody;
-import org.springframework.web.client.RestTemplate;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.transaction.annotation.Transactional;
 
 @Controller // This means that that class is a Controller
 @RequestMapping(path="/api") // This means URL's start with /api(after Application path)
@@ -33,6 +30,80 @@ public class MainController {
     @Autowired
     private VacationEntryRepository vacationEntryRepository;
 
+    @Autowired
+    private HolidayService holidayService;
+
+    private User callerOf(Principal principal) {
+        return principal == null ? null : userRepository.findByEmail(principal.getName());
+    }
+
+    private boolean isAdmin(User user) {
+        return user != null && "admin".equalsIgnoreCase(user.getRole());
+    }
+
+    /**
+     * Checks that the caller may act on {@code trainerId}'s cohort: an admin may act on behalf of
+     * any trainer, a trainer only on their own. Returns an error message, or null if allowed.
+     */
+    private String checkTrainerScope(Principal principal, Integer trainerId) {
+        User caller = callerOf(principal);
+        if (caller == null) {
+            return "Error: Not logged in";
+        }
+        if (!isAdmin(caller) && !caller.getId().equals(trainerId)) {
+            return "Error: Trainers can only manage their own participants";
+        }
+        return null;
+    }
+
+    /**
+     * Checks that the caller may act on {@code entry}: an admin may act on any entry, a trainer
+     * only on entries where they are the assigned trainer. Returns an error message, or null if
+     * allowed.
+     */
+    private String checkEntryScope(Principal principal, VacationEntry entry) {
+        User caller = callerOf(principal);
+        if (caller == null) {
+            return "Error: Not logged in";
+        }
+        if (isAdmin(caller)) {
+            return null;
+        }
+        User trainer = entry.getTrainer();
+        if (trainer == null || !trainer.getId().equals(caller.getId())) {
+            return "Error: Trainers can only manage vacations of their own participants";
+        }
+        return null;
+    }
+
+    /**
+     * The calendar days in [start, end] that {@code participantId} has already been charged for by
+     * another approved entry. Subtracting these before counting working days is what stops an
+     * overlapping company holiday and vacation from deducting the same day twice.
+     */
+    private Set<LocalDate> daysAlreadyCharged(Integer participantId, LocalDate start, LocalDate end,
+                                              Integer excludeEntryId) {
+        Set<LocalDate> charged = new HashSet<>();
+        for (VacationEntry other : vacationEntryRepository.findApprovedOverlappingByParticipantId(
+                participantId, start, end)) {
+            if (excludeEntryId != null && excludeEntryId.equals(other.getId())) {
+                continue;
+            }
+            LocalDate from = other.getStartDate().isBefore(start) ? start : other.getStartDate();
+            LocalDate to = other.getEndDate().isAfter(end) ? end : other.getEndDate();
+            for (LocalDate d = from; !d.isAfter(to); d = d.plusDays(1)) {
+                charged.add(d);
+            }
+        }
+        return charged;
+    }
+
+    /** True if {@code target} is a participant assigned to {@code trainer}. */
+    private boolean isOwnParticipant(User trainer, User target) {
+        User assigned = target == null ? null : target.getAssignedTrainer();
+        return assigned != null && assigned.getId().equals(trainer.getId());
+    }
+
     @GetMapping(path="/me")
     public @ResponseBody User getCurrentUser(Principal principal) {
         if (principal == null) {
@@ -41,28 +112,60 @@ public class MainController {
         return userRepository.findByEmail(principal.getName());
     }
 
+    @Transactional
     @DeleteMapping(path="/delete/{id}")
-    public @ResponseBody String deleteUser (@PathVariable Integer id) {
-        if (!userRepository.existsById(id)) {
+    public @ResponseBody String deleteUser (@PathVariable Integer id, Principal principal) {
+        User caller = callerOf(principal);
+        if (caller == null) {
+            return "Error: Not logged in";
+        }
+        User target = userRepository.findById(id).orElse(null);
+        if (target == null) {
             return "Error: User not found";
         }
-        
+        if (!isAdmin(caller) && !isOwnParticipant(caller, target)) {
+            return "Error: Trainers can only delete their own participants";
+        }
+
+
         List<VacationEntry> asParticipant = vacationEntryRepository.findByParticipantId(id);
         vacationEntryRepository.deleteAll(asParticipant);
-        
+
         List<VacationEntry> asTrainer = vacationEntryRepository.findByTrainerId(id);
+        for (VacationEntry v : asTrainer) {
+            if ("approved".equals(v.getStatus()) && v.getDeductedDays() != null) {
+                User participant = v.getParticipant();
+                if (participant != null) {
+                    participant = userRepository.findByIdWithLock(participant.getId()).orElse(participant);
+                    participant.setVacationDays(participant.getVacationDays() + v.getDeductedDays());
+                    userRepository.save(participant);
+                }
+            }
+        }
         vacationEntryRepository.deleteAll(asTrainer);
+
+        List<User> assignedParticipants = userRepository.findByAssignedTrainerId(id);
+        for (User p : assignedParticipants) {
+            p.setAssignedTrainer(null);
+            userRepository.save(p);
+        }
 
         userRepository.deleteById(id);
         return "User Deleted";
     }
 
-    @PostMapping(path="/add") // Map ONLY POST Requests
+    @PostMapping(path="/add")
     public @ResponseBody String addNewUser (@RequestParam String name
             , @RequestParam String email, @RequestParam String role, @RequestParam String password,
-            @RequestParam(required = false) Integer assignedTrainerId) {
+            @RequestParam(required = false) Integer assignedTrainerId, Principal principal) {
         // @ResponseBody means the returned String is the response, not a view name
         // @RequestParam means it is a parameter from the GET or POST request
+
+        User caller = userRepository.findByEmail(principal.getName());
+        if (caller != null && "berufstrainer".equalsIgnoreCase(caller.getRole())
+                && !"teilnehmer".equalsIgnoreCase(role)) {
+            return "Error: Trainers can only create participant accounts";
+        }
 
         User n = new User();
         n.setName(name);
@@ -82,10 +185,18 @@ public class MainController {
     }
 
     @PostMapping(path="/updateVacationDays")
-    public @ResponseBody String updateVacationDays (@RequestParam Integer userId, @RequestParam Double days) {
+    public @ResponseBody String updateVacationDays (@RequestParam Integer userId, @RequestParam Double days,
+                                                    Principal principal) {
+        User caller = callerOf(principal);
+        if (caller == null) {
+            return "Error: Not logged in";
+        }
         User user = userRepository.findById(userId).orElse(null);
         if (user == null) {
             return "Error: User not found";
+        }
+        if (!isAdmin(caller) && !isOwnParticipant(caller, user)) {
+            return "Error: Trainers can only update their own participants";
         }
         user.setVacationDays(days);
         userRepository.save(user);
@@ -182,87 +293,205 @@ public class MainController {
         return allVacations;
     }
 
+    @Transactional
     @PostMapping(path="/approveVacation")
-    public @ResponseBody String approveVacation (@RequestParam Integer id) {
-        VacationEntry v = vacationEntryRepository.findById(id).orElse(null);
+    public @ResponseBody String approveVacation (@RequestParam Integer id, Principal principal) {
+        VacationEntry v = vacationEntryRepository.findByIdWithLock(id).orElse(null);
         if (v == null) {
             return "Error: Vacation Entry not found";
         }
-        
+
+        String denied = checkEntryScope(principal, v);
+        if (denied != null) {
+            return denied;
+        }
+
         if ("approved".equals(v.getStatus())) {
             return "Vacation Entry already approved";
         }
 
-        // Calculate working days (excluding weekends and holidays)
-        LocalDate start = v.getStartDate();
-        LocalDate end = v.getEndDate();
-        double workingDays = 0;
-        
-        if (start != null && end != null) {
-            Set<LocalDate> holidays = new HashSet<>();
-            try {
-                int year = start.getYear();
-                String url = "https://get.api-feiertage.de/?years=" + year + "&states=by";
-                RestTemplate restTemplate = new RestTemplate();
-                String response = restTemplate.getForObject(url, String.class);
-                
-                ObjectMapper mapper = new ObjectMapper();
-                JsonNode root = mapper.readTree(response);
-                JsonNode feiertage = root.path("feiertage");
-                if (feiertage.isArray()) {
-                    for (JsonNode holiday : feiertage) {
-                        holidays.add(LocalDate.parse(holiday.path("date").asText()));
-                    }
-                }
-                
-                // If end date is in next year, fetch next year's holidays too
-                if (end.getYear() > year) {
-                     url = "https://get.api-feiertage.de/?years=" + end.getYear() + "&states=by";
-                     response = restTemplate.getForObject(url, String.class);
-                     root = mapper.readTree(response);
-                     feiertage = root.path("feiertage");
-                     if (feiertage.isArray()) {
-                        for (JsonNode holiday : feiertage) {
-                            holidays.add(LocalDate.parse(holiday.path("date").asText()));
-                        }
-                    }
-                }
-
-            } catch (Exception e) {
-                e.printStackTrace(); // Log error but continue with weekends logic
-            }
-
-            LocalDate current = start;
-            while (!current.isAfter(end)) {
-                DayOfWeek day = current.getDayOfWeek();
-                if (day != DayOfWeek.SATURDAY && day != DayOfWeek.SUNDAY && !holidays.contains(current)) {
-                    workingDays++;
-                }
-                current = current.plusDays(1);
-            }
+        User participant = v.getParticipant();
+        if (participant != null && vacationEntryRepository.existsApprovedRegularOverlappingByParticipantId(
+                participant.getId(), v.getStartDate(), v.getEndDate(), v.getId())) {
+            return "Error: Participant already has an approved vacation overlapping this period";
         }
 
-        // Update participant's vacation days
-        User participant = v.getParticipant();
+        double workingDays;
+        try {
+            Set<LocalDate> chargeable = holidayService.workingDaysIn(v.getStartDate(), v.getEndDate());
+            // A company holiday may already cover part of this range; charge only the rest.
+            if (participant != null) {
+                chargeable.removeAll(daysAlreadyCharged(
+                        participant.getId(), v.getStartDate(), v.getEndDate(), v.getId()));
+            }
+            workingDays = chargeable.size();
+        } catch (RuntimeException e) {
+            return "Error: Could not approve vacation — holiday API unavailable";
+        }
         if (participant != null) {
-            double currentDays = participant.getVacationDays() != null ? participant.getVacationDays() : 30.0;
+            participant = userRepository.findByIdWithLock(participant.getId()).orElse(participant);
+            double currentDays = participant.getVacationDays();
+            if (currentDays < workingDays) {
+                return "Error: Insufficient vacation balance (" + currentDays + " days remaining, " + workingDays + " required)";
+            }
             participant.setVacationDays(currentDays - workingDays);
             userRepository.save(participant);
         }
 
         v.setStatus("approved");
+        v.setDeductedDays(workingDays);
         vacationEntryRepository.save(v);
         return "Vacation Entry Approved";
     }
 
+    @Transactional
     @PostMapping(path="/denyVacation")
-    public @ResponseBody String denyVacation (@RequestParam Integer id) {
-        VacationEntry v = vacationEntryRepository.findById(id).orElse(null);
+    public @ResponseBody String denyVacation (@RequestParam Integer id, Principal principal) {
+        VacationEntry v = vacationEntryRepository.findByIdWithLock(id).orElse(null);
         if (v == null) {
             return "Error: Vacation Entry not found";
+        }
+
+        String denied = checkEntryScope(principal, v);
+        if (denied != null) {
+            return denied;
+        }
+
+        if ("Company Holiday".equals(v.getReason())) {
+            return "Error: Company holidays cannot be denied; use removeCompanyHolidays instead";
+        }
+        if ("approved".equals(v.getStatus())) {
+            double refund;
+            if (v.getDeductedDays() != null) {
+                refund = v.getDeductedDays();
+            } else {
+                try {
+                    refund = holidayService.calculateWorkingDays(v.getStartDate(), v.getEndDate());
+                } catch (RuntimeException e) {
+                    return "Error: Could not deny vacation — deductedDays missing and holiday API unavailable";
+                }
+            }
+            User participant = v.getParticipant();
+            if (participant != null) {
+                participant = userRepository.findByIdWithLock(participant.getId()).orElse(participant);
+                participant.setVacationDays(participant.getVacationDays() + refund);
+                userRepository.save(participant);
+            }
         }
         v.setStatus("denied");
         vacationEntryRepository.save(v);
         return "Vacation Entry Denied";
     }
+
+    @Transactional
+    @PostMapping(path="/addCompanyHolidays")
+    public @ResponseBody String addCompanyHolidays (@RequestParam String startDate, @RequestParam String endDate,
+                                                    @RequestParam Integer trainerId, Principal principal) {
+        String denied = checkTrainerScope(principal, trainerId);
+        if (denied != null) {
+            return denied;
+        }
+
+        User trainer = userRepository.findById(trainerId).orElse(null);
+        if (trainer == null || !"berufstrainer".equalsIgnoreCase(trainer.getRole())) {
+            return "Error: Invalid trainer";
+        }
+
+        LocalDate start = LocalDate.parse(startDate);
+        LocalDate end = LocalDate.parse(endDate);
+        Set<LocalDate> rangeWorkingDays;
+        try {
+            // Resolved once for the whole cohort; the per-participant deduction is derived from it.
+            rangeWorkingDays = holidayService.workingDaysIn(start, end);
+        } catch (RuntimeException e) {
+            return "Error: Could not add company holidays — holiday API unavailable";
+        }
+
+        List<User> participants = userRepository.findByAssignedTrainerId(trainerId);
+        int count = 0;
+        for (User p : participants) {
+            if (vacationEntryRepository.existsOverlappingByParticipantIdAndReason(
+                    p.getId(), start, end, "Company Holiday")) {
+                continue;
+            }
+
+            // Days already charged by an overlapping approved vacation must not be charged again.
+            Set<LocalDate> chargeable = new HashSet<>(rangeWorkingDays);
+            chargeable.removeAll(daysAlreadyCharged(p.getId(), start, end, null));
+            double workingDays = chargeable.size();
+
+            User lockedP = userRepository.findByIdWithLock(p.getId()).orElse(p);
+            double currentDays = lockedP.getVacationDays();
+            // Company holidays are mandatory, but never drive a balance further negative:
+            // deduct only what's available and record the actual amount so removal refunds it
+            // exactly. Clamping at zero matters for an already-negative balance — a bare
+            // min(currentDays, workingDays) would be negative there and *credit* the participant.
+            double deduction = Math.min(Math.max(currentDays, 0), workingDays);
+
+            VacationEntry v = new VacationEntry();
+            v.setStartDate(start);
+            v.setEndDate(end);
+            v.setParticipant(p);
+            v.setTrainer(trainer);
+            v.setStatus("approved");
+            v.setReason("Company Holiday");
+            v.setDeductedDays(deduction);
+            vacationEntryRepository.save(v);
+
+            lockedP.setVacationDays(currentDays - deduction);
+            userRepository.save(lockedP);
+            count++;
+        }
+
+        return "Added Company Holidays for " + count + " participants";
+    }
+
+    @GetMapping(path="/getCompanyHolidays")
+    public @ResponseBody List<VacationEntry> getCompanyHolidays(@RequestParam Integer trainerId) {
+        return vacationEntryRepository.findByTrainerIdAndReason(trainerId, "Company Holiday");
+    }
+
+    @Transactional
+    @PostMapping(path="/removeCompanyHolidays")
+    public @ResponseBody String removeCompanyHolidays (@RequestParam String startDate, @RequestParam String endDate,
+                                                       @RequestParam Integer trainerId, Principal principal) {
+        String denied = checkTrainerScope(principal, trainerId);
+        if (denied != null) {
+            return denied;
+        }
+
+        List<VacationEntry> entries = vacationEntryRepository.findByTrainerIdAndReason(trainerId, "Company Holiday");
+        
+        LocalDate start = LocalDate.parse(startDate);
+        LocalDate end = LocalDate.parse(endDate);
+
+        boolean needsFallback = entries.stream()
+                .anyMatch(v -> v.getStartDate().equals(start) && v.getEndDate().equals(end)
+                        && "approved".equals(v.getStatus()) && v.getDeductedDays() == null);
+        Double fallbackDays = null;
+        if (needsFallback) {
+            try {
+                fallbackDays = holidayService.calculateWorkingDays(start, end);
+            } catch (RuntimeException e) {
+                return "Error: Could not remove company holidays — deductedDays missing and holiday API unavailable";
+            }
+        }
+
+        int count = 0;
+        for (VacationEntry v : entries) {
+            if (v.getStartDate().equals(start) && v.getEndDate().equals(end) && "approved".equals(v.getStatus())) {
+                User participant = v.getParticipant();
+                if (participant != null) {
+                    double refund = v.getDeductedDays() != null ? v.getDeductedDays() : fallbackDays;
+                    participant = userRepository.findByIdWithLock(participant.getId()).orElse(participant);
+                    participant.setVacationDays(participant.getVacationDays() + refund);
+                    userRepository.save(participant);
+                }
+                vacationEntryRepository.delete(v);
+                count++;
+            }
+        }
+        return "Removed Company Holidays for " + count + " participants";
+    }
+
 }
